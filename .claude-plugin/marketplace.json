@@ -9,7 +9,7 @@
     {
       "name": "claude-observe",
       "source": "./",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "description": "Records the events a transcript can never contain — liveness and pid, why a session ended, typed tool failures, denied permissions, API-killed turns, subagent lifecycle, compaction boundaries — to an append-only log, and reports on them. Hooks only rare and failure paths, so it adds no latency to the tool loop.",
       "category": "monitoring",
       "keywords": [
