@@ -101,6 +101,7 @@ Hooked, because a transcript cannot contain it:
 | `SessionEnd` | *why* it closed — `clear`, `logout`, `prompt_input_exit`, `other` |
 | `StopFailure` | a turn killed by an API error |
 | `PostToolUseFailure` | typed failures — `tool_error_type` is `timeout`, not prose to regex |
+| | *Note: a command exiting non-zero is a **successful** tool call that returned an error, and does not fire this. This is for the tool itself failing — a timeout or a crash. Command-level failures are already in the transcript.* |
 | `PermissionDenied` | what the classifier refused |
 | `SubagentStart` / `SubagentStop` | subagent lifecycle with `agent_type` |
 | `PreCompact` / `PostCompact` | compaction boundaries and trigger |
