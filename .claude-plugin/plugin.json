@@ -1,0 +1,21 @@
+{
+  "name": "claude-observe",
+  "displayName": "Claude Observe",
+  "description": "Session observability for Claude Code. Records the events a transcript can never contain — liveness and pid, why a session ended, typed tool failures, denied permissions, API-killed turns, subagent lifecycle, compaction boundaries — to an append-only log, and reports on them. Hooks only rare and failure paths, so it adds no latency to the tool loop.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Alexander Opalic"
+  },
+  "homepage": "https://alexop.dev",
+  "repository": "https://github.com/alexanderop/claude-observe",
+  "license": "MIT",
+  "keywords": [
+    "observability",
+    "hooks",
+    "telemetry",
+    "sessions",
+    "liveness",
+    "diagnostics",
+    "monitoring"
+  ]
+}

@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# claude-observe recorder.
+#
+# Reads a Claude Code hook payload on stdin and appends one JSON line to this
+# session's log. Wired to rare and failure-path events only, so it never sits
+# on the tool-call critical path.
+#
+# Design constraints, in order of importance:
+#   1. Never fail a hook. Every path exits 0.
+#   2. No hard dependencies. No jq, no node — the raw payload is already valid
+#      JSON, so it is embedded verbatim rather than parsed and re-serialized.
+#   3. One line per event, appended. Readers do the work; this does not.
+
+set -u
+
+data_dir="${CLAUDE_PLUGIN_DATA:-$HOME/.claude/plugins/data/claude-observe}"
+log_dir="$data_dir/sessions"
+
+raw="$(cat)"
+[ -n "$raw" ] || exit 0
+
+# Minimal field extraction. session_id and hook_event_name are flat string
+# fields, so a sed match is sufficient and costs far less than a JSON parser.
+# Anything else a reader needs is in the embedded payload.
+field() {
+  printf '%s' "$raw" \
+    | sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" \
+    | head -n 1
+}
+
+session_id="$(field session_id)"
+event="$(field hook_event_name)"
+[ -n "$session_id" ] || session_id="unknown"
+
+# The hook payload carries no pid, so the owning Claude Code process is found
+# by walking up from this script's parent. A `command` hook runs through a
+# shell, so the process directly above us is never the one we want.
+#
+# Match on the executable name (`comm`), NOT the full argument list. Matching
+# args is tempting and wrong: the hook's own parent shell sources a snapshot
+# under ~/.claude, so every shell in the tree "contains claude" and the walk
+# stops one hop early on a false positive. Verified against a real tree:
+#   hook shell (/bin/zsh) -> claude -> login shell -> terminal
+#
+# Bounded to 8 hops. On failure this reports 0 rather than guessing: an
+# unresolved pid is recoverable, a confidently wrong one is not.
+resolve_claude_pid() {
+  local pid="$PPID" hops=0 line ppid comm base
+  while [ "$pid" -gt 1 ] && [ "$hops" -lt 8 ]; do
+    line="$(ps -o ppid=,comm= -p "$pid" 2>/dev/null)" || break
+    [ -n "$line" ] || break
+    line="${line#"${line%%[![:space:]]*}"}"
+    ppid="${line%% *}"
+    comm="${line#* }"
+    base="${comm##*/}"
+    if [ "$base" = "claude" ]; then
+      printf '%s' "$pid"
+      return 0
+    fi
+    case "$ppid" in
+      ''|*[!0-9]*) break ;;
+    esac
+    pid="$ppid"
+    hops=$((hops + 1))
+  done
+  printf '0'
+}
+
+claude_pid="$(resolve_claude_pid)"
+
+mkdir -p "$log_dir" 2>/dev/null || exit 0
+
+printf '{"ts":"%s","event":"%s","hook_pid":%s,"claude_pid":%s,"payload":%s}\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  "$event" \
+  "$$" \
+  "${claude_pid:-0}" \
+  "$raw" \
+  >>"$log_dir/$session_id.jsonl" 2>/dev/null
+
+exit 0

@@ -1,0 +1,208 @@
+#!/usr/bin/env node
+// claude-observe reporter.
+//
+// Reads the append-only logs written by bin/observe-record and answers the
+// questions a transcript cannot: is this session still alive, why did it stop,
+// and what failed along the way.
+//
+// Usage:
+//   observe-report                 recent sessions, newest first
+//   observe-report --live          only sessions believed to be running
+//   observe-report <session_id>    full event detail for one session
+//   observe-report --json          machine-readable summary of all sessions
+
+const fs = require('node:fs')
+const path = require('node:path')
+const { execFileSync } = require('node:child_process')
+
+const DATA_DIR =
+  process.env.CLAUDE_PLUGIN_DATA ||
+  path.join(process.env.HOME || '', '.claude/plugins/data/claude-observe')
+const LOG_DIR = path.join(DATA_DIR, 'sessions')
+
+/** A pid alone is not proof: pids get recycled, and a recycled pid running
+ *  anything that merely references a ~/.claude path would pass a substring
+ *  test. Compare the executable name instead. */
+function processIsClaude(pid) {
+  if (!pid || pid <= 1) return false
+  try {
+    const comm = execFileSync('ps', ['-o', 'comm=', '-p', String(pid)], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim()
+    return path.basename(comm) === 'claude'
+  } catch {
+    return false
+  }
+}
+
+function readSession(file) {
+  const events = []
+  for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+    if (!line.trim()) continue
+    try {
+      events.push(JSON.parse(line))
+    } catch {
+      // A truncated final line means a session died mid-write. Skipping it is
+      // correct — but it is itself a signal, so it is counted below.
+      events.push({ event: 'corrupt', ts: null, payload: {} })
+    }
+  }
+  return events
+}
+
+function summarize(file) {
+  const id = path.basename(file, '.jsonl')
+  const events = readSession(file)
+  if (events.length === 0) return null
+
+  const byEvent = {}
+  for (const e of events) byEvent[e.event] = (byEvent[e.event] || 0) + 1
+
+  const start = events.find((e) => e.event === 'SessionStart')
+  const end = events.find((e) => e.event === 'SessionEnd')
+  const pid = start?.claude_pid ?? events[0]?.claude_pid ?? 0
+
+  // Three knowable states plus one honest unknown. `orphaned` is only claimed
+  // when a pid was actually resolved and that process is gone — an unresolved
+  // pid means "we don't know", never "it died".
+  let state
+  if (end) state = 'ended'
+  else if (!pid) state = 'unknown'
+  else if (processIsClaude(pid)) state = 'running'
+  else state = 'orphaned'
+
+  const failures = events
+    .filter((e) => e.event === 'PostToolUseFailure')
+    .map((e) => ({
+      tool: e.payload?.tool_name ?? '?',
+      type: e.payload?.tool_error_type ?? 'unknown',
+      detail: (e.payload?.tool_error ?? '').split('\n')[0].slice(0, 120),
+      ts: e.ts,
+    }))
+
+  const denials = events
+    .filter((e) => e.event === 'PermissionDenied')
+    .map((e) => ({ tool: e.payload?.tool_name ?? '?', ts: e.ts }))
+
+  return {
+    id,
+    state,
+    pid,
+    cwd: start?.payload?.cwd ?? '?',
+    // How the session began: startup | resume | clear | compact | fork.
+    source: start?.payload?.source ?? null,
+    // Absent in headless (-p) runs, so this is frequently unknown by design.
+    permissionMode: start?.payload?.permission_mode ?? '?',
+    startedAt: start?.ts ?? events[0]?.ts ?? null,
+    endedAt: end?.ts ?? null,
+    endReason: end?.payload?.reason ?? end?.payload?.matcher ?? null,
+    transcript: start?.payload?.transcript_path ?? null,
+    counts: byEvent,
+    failures,
+    denials,
+    events,
+  }
+}
+
+function allSessions() {
+  if (!fs.existsSync(LOG_DIR)) return []
+  return fs
+    .readdirSync(LOG_DIR)
+    .filter((f) => f.endsWith('.jsonl'))
+    .map((f) => path.join(LOG_DIR, f))
+    .map((f) => {
+      try {
+        return { ...summarize(f), mtime: fs.statSync(f).mtimeMs }
+      } catch {
+        return null
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.mtime - a.mtime)
+}
+
+const STATE_LABEL = {
+  running: 'running ',
+  ended: 'ended   ',
+  orphaned: 'ORPHANED',
+  unknown: 'unknown ',
+}
+
+function short(ts) {
+  return ts ? ts.replace('T', ' ').replace('Z', '') : '—'
+}
+
+function printList(sessions) {
+  if (sessions.length === 0) {
+    console.log('No sessions recorded yet.')
+    console.log(`Looked in: ${LOG_DIR}`)
+    console.log('\nIf the plugin is enabled, start a Claude Code session and check again.')
+    return
+  }
+  console.log(`${sessions.length} session(s) — ${LOG_DIR}\n`)
+  for (const s of sessions) {
+    const flags = []
+    if (s.failures.length) flags.push(`${s.failures.length} tool failure(s)`)
+    if (s.denials.length) flags.push(`${s.denials.length} denial(s)`)
+    if (s.counts.StopFailure) flags.push(`${s.counts.StopFailure} API error(s)`)
+    if (s.counts.PreCompact) flags.push(`${s.counts.PreCompact} compaction(s)`)
+    if (s.counts.SubagentStart) flags.push(`${s.counts.SubagentStart} subagent(s)`)
+
+    console.log(`  ${STATE_LABEL[s.state]}  ${s.id.slice(0, 8)}  ${short(s.startedAt)}  pid ${s.pid}`)
+    console.log(`            ${s.cwd}`)
+    if (s.state === 'ended' && s.endReason) console.log(`            ended: ${s.endReason}`)
+    if (s.state === 'orphaned')
+      console.log(`            stopped without closing — killed, crashed, or machine went down`)
+    if (s.state === 'unknown')
+      console.log(`            pid was never resolved; liveness cannot be determined`)
+    if (flags.length) console.log(`            ${flags.join(' · ')}`)
+    console.log('')
+  }
+}
+
+function printDetail(s) {
+  console.log(`session   ${s.id}`)
+  console.log(`state     ${s.state}${s.endReason ? ` (${s.endReason})` : ''}`)
+  console.log(`pid       ${s.pid}`)
+  console.log(`cwd       ${s.cwd}`)
+  console.log(`source    ${s.source ?? '—'}`)
+  console.log(`mode      ${s.permissionMode}`)
+  console.log(`started   ${short(s.startedAt)}`)
+  console.log(`ended     ${short(s.endedAt)}`)
+  if (s.transcript) console.log(`transcript ${s.transcript}`)
+
+  if (s.failures.length) {
+    console.log(`\ntool failures (${s.failures.length}):`)
+    for (const f of s.failures) console.log(`  ${short(f.ts)}  ${f.tool} [${f.type}] ${f.detail}`)
+  }
+  if (s.denials.length) {
+    console.log(`\npermission denials (${s.denials.length}):`)
+    for (const d of s.denials) console.log(`  ${short(d.ts)}  ${d.tool}`)
+  }
+
+  console.log('\nevent log:')
+  for (const e of s.events) {
+    const extra =
+      e.payload?.tool_name || e.payload?.agent_type || e.payload?.trigger || e.payload?.reason || ''
+    console.log(`  ${short(e.ts)}  ${e.event}${extra ? `  ${extra}` : ''}`)
+  }
+}
+
+const arg = process.argv[2]
+const sessions = allSessions()
+
+if (arg === '--json') {
+  console.log(JSON.stringify(sessions.map(({ events, ...rest }) => rest), null, 2))
+} else if (arg === '--live') {
+  printList(sessions.filter((s) => s.state === 'running'))
+} else if (arg && !arg.startsWith('--')) {
+  const match = sessions.find((s) => s.id === arg || s.id.startsWith(arg))
+  if (!match) {
+    console.error(`No session matching "${arg}".`)
+    process.exit(1)
+  }
+  printDetail(match)
+} else {
+  printList(sessions)
+}
