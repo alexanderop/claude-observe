@@ -15,10 +15,26 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { execFileSync } = require('node:child_process')
 
-const DATA_DIR =
-  process.env.CLAUDE_PLUGIN_DATA ||
-  path.join(process.env.HOME || '', '.claude/plugins/data/claude-observe')
-const LOG_DIR = path.join(DATA_DIR, 'sessions')
+// Run as a Bash-tool command, CLAUDE_PLUGIN_DATA is set and points at this
+// install. Run from a plain terminal it is not, and the directory cannot be
+// hardcoded: the id is `<plugin>-<marketplace>`, so a marketplace install is
+// `claude-observe-claude-observe` while `--plugin-dir` is `claude-observe-inline`.
+// Discover every variant and merge, so the same command works either way and
+// keeps working if the plugin is later installed under a different marketplace.
+function logDirs() {
+  if (process.env.CLAUDE_PLUGIN_DATA) {
+    return [path.join(process.env.CLAUDE_PLUGIN_DATA, 'sessions')]
+  }
+  const root = path.join(process.env.HOME || '', '.claude/plugins/data')
+  if (!fs.existsSync(root)) return []
+  return fs
+    .readdirSync(root)
+    .filter((d) => d === 'claude-observe' || d.startsWith('claude-observe-'))
+    .map((d) => path.join(root, d, 'sessions'))
+    .filter((d) => fs.existsSync(d))
+}
+
+const LOG_DIRS = logDirs()
 
 /** A pid alone is not proof: pids get recycled, and a recycled pid running
  *  anything that merely references a ~/.claude path would pass a substring
@@ -106,20 +122,21 @@ function summarize(file) {
 }
 
 function allSessions() {
-  if (!fs.existsSync(LOG_DIR)) return []
-  return fs
-    .readdirSync(LOG_DIR)
-    .filter((f) => f.endsWith('.jsonl'))
-    .map((f) => path.join(LOG_DIR, f))
-    .map((f) => {
-      try {
-        return { ...summarize(f), mtime: fs.statSync(f).mtimeMs }
-      } catch {
-        return null
-      }
-    })
-    .filter(Boolean)
-    .sort((a, b) => b.mtime - a.mtime)
+  return LOG_DIRS.flatMap((dir) =>
+    fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.jsonl'))
+      .map((f) => path.join(dir, f))
+      .map((f) => {
+        try {
+          const s = summarize(f)
+          return s ? { ...s, mtime: fs.statSync(f).mtimeMs } : null
+        } catch {
+          return null
+        }
+      })
+      .filter(Boolean),
+  ).sort((a, b) => b.mtime - a.mtime)
 }
 
 const STATE_LABEL = {
@@ -136,11 +153,15 @@ function short(ts) {
 function printList(sessions) {
   if (sessions.length === 0) {
     console.log('No sessions recorded yet.')
-    console.log(`Looked in: ${LOG_DIR}`)
+    console.log(
+      LOG_DIRS.length
+        ? `Looked in:\n  ${LOG_DIRS.join('\n  ')}`
+        : 'No claude-observe data directory found under ~/.claude/plugins/data/.',
+    )
     console.log('\nIf the plugin is enabled, start a Claude Code session and check again.')
     return
   }
-  console.log(`${sessions.length} session(s) — ${LOG_DIR}\n`)
+  console.log(`${sessions.length} session(s) — ${LOG_DIRS.join(', ')}\n`)
   for (const s of sessions) {
     const flags = []
     if (s.failures.length) flags.push(`${s.failures.length} tool failure(s)`)

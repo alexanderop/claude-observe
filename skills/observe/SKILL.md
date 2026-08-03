@@ -10,7 +10,8 @@ responding*.
 
 ## Reading the data
 
-Run the reporter — it is on `PATH` while this plugin is enabled:
+Run the reporter. The plugin's `bin/` is on the Bash tool's `PATH` while the
+plugin is enabled, so this is a bare command — do not path-qualify it:
 
 ```bash
 observe-report              # recent sessions, newest first

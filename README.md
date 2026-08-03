@@ -42,6 +42,14 @@ Enabled once, it applies to every project. Nothing to add per repository.
 
 ## Use
 
+The simplest path is to ask, and let the bundled skill do it: *"is anything
+still running?"*, *"why did that session die?"*, *"what failed in the last run?"*
+
+### From inside Claude Code
+
+`bin/` is added to **the Bash tool's PATH** while the plugin is enabled, so
+`observe-report` is a bare command in any Bash tool call. Nothing to set up.
+
 ```bash
 observe-report              # recent sessions, newest first
 observe-report --live       # only sessions believed to be running
@@ -49,8 +57,23 @@ observe-report <session_id> # full event detail (prefix match works)
 observe-report --json       # machine-readable
 ```
 
-Or just ask, and the bundled skill handles it: *"is anything still running?"*,
-*"why did that session die?"*, *"what failed in the last run?"*
+### From your own terminal
+
+That PATH entry applies to Claude Code's shell, **not** yours. To use the same
+command in your terminal, clone this repo and link it somewhere on your `PATH`:
+
+```bash
+git clone https://github.com/alexanderop/claude-observe.git
+ln -s "$PWD/claude-observe/bin/observe-report" ~/.local/bin/observe-report
+```
+
+Link the repo rather than the installed plugin directory: the install path is a
+managed cache that moves on update, while a clone is stable.
+
+Run this way, `CLAUDE_PLUGIN_DATA` is unset, so the reporter discovers every
+`~/.claude/plugins/data/claude-observe*/` directory and merges them — a
+marketplace install (`claude-observe-claude-observe`) and a `--plugin-dir`
+development run (`claude-observe-inline`) both show up, labelled by source.
 
 ## The three states
 
